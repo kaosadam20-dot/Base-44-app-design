@@ -16,6 +16,39 @@ import '../image_data.dart';
 import '../rendering/rendering_tester.dart' show TestCallbackPainter, TestClipPaintingContext;
 
 void main() {
+  // Regression test for https://github.com/flutter/flutter/issues/196649.
+  testWidgets('ListWheelScrollView does not report children on the back of the wheel as painted', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: 200,
+            height: 200,
+            child: ListWheelScrollView(
+              itemExtent: 50,
+              diameterRatio: 0.5,
+              renderChildrenOutsideViewport: true,
+              clipBehavior: Clip.none,
+              children: List<Widget>.generate(5, (int index) => const SizedBox()),
+            ),
+          ),
+        ),
+      ),
+    );
+    final RenderListWheelViewport viewport = tester.renderObject(find.byType(ListWheelViewport));
+    final painted = <bool>[];
+    viewport.visitChildren(
+      (RenderObject child) => painted.add(viewport.paintsChild(child as RenderBox)),
+    );
+    // With a diameter ratio of 0.5, the child at index i is at an angle of
+    // -i * pi / 4 on the wheel.
+    expect(painted, <bool>[true, true, true, false, false]);
+  });
+
   testWidgets('ListWheelScrollView respects clipBehavior', (WidgetTester tester) async {
     await tester.pumpWidget(
       Directionality(
