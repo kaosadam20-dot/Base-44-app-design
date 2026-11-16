@@ -915,6 +915,25 @@ void main() {
         reason: 'Leading clip should follow the content once insideClipExtent is consumed',
       );
     });
+
+    // Regression test for https://github.com/flutter/flutter/issues/196649.
+    testWidgets('does not report the child as painted when the clip is empty', (
+      WidgetTester tester,
+    ) async {
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(_buildOverlapScenario(controller: controller));
+      final RenderSliverClipRRect renderSliver = tester.renderObject(find.byType(SliverClipRRect));
+      expect(renderSliver.paintsChild(renderSliver.child!), isTrue);
+
+      // The pinned header covers the whole visible part of the child, so the
+      // clip is empty even though the child is visible.
+      controller.jumpTo(150.0);
+      await tester.pump();
+      expect(renderSliver.child!.geometry!.visible, isTrue);
+      expect(renderSliver.paintsChild(renderSliver.child!), isFalse);
+    });
   });
 }
 

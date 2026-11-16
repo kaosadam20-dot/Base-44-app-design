@@ -21,6 +21,49 @@ void main() {
     );
   });
 
+  // Regression test for https://github.com/flutter/flutter/issues/196649.
+  testWidgets('Overlay only reports onstage entries as painted', (WidgetTester tester) async {
+    const offstageKey = Key('offstage');
+    const onstageKey = Key('onstage');
+    final offstageEntry = OverlayEntry(
+      maintainState: true,
+      builder: (BuildContext context) => const SizedBox(key: offstageKey),
+    );
+    final onstageEntry = OverlayEntry(
+      opaque: true,
+      builder: (BuildContext context) => const SizedBox(key: onstageKey),
+    );
+    addTearDown(
+      () => offstageEntry
+        ..remove()
+        ..dispose(),
+    );
+    addTearDown(
+      () => onstageEntry
+        ..remove()
+        ..dispose(),
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: Overlay(initialEntries: <OverlayEntry>[offstageEntry, onstageEntry]),
+      ),
+    );
+
+    bool paintsChild(Key key) {
+      RenderObject child = tester.renderObject(find.byKey(key, skipOffstage: false));
+      RenderObject parent = child.parent!;
+      while ('${parent.runtimeType}' != '_RenderTheater') {
+        child = parent;
+        parent = parent.parent!;
+      }
+      return parent.paintsChild(child);
+    }
+
+    expect(paintsChild(offstageKey), isFalse);
+    expect(paintsChild(onstageKey), isTrue);
+  });
+
   testWidgets('OverflowEntries context contains Overlay', (WidgetTester tester) async {
     final GlobalKey overlayKey = GlobalKey();
     var didBuild = false;
