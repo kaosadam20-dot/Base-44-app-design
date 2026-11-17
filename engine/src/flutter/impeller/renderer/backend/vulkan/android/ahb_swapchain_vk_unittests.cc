@@ -2,9 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <chrono>
+#include <thread>
+
 #include "gtest/gtest.h"
 
 #include "impeller/renderer/backend/vulkan/android/android_test_utils.h"
+#include "impeller/renderer/backend/vulkan/fence_waiter_vk.h"
 #include "impeller/renderer/backend/vulkan/swapchain/ahb/ahb_swapchain_vk.h"
 #include "impeller/renderer/backend/vulkan/test/mock_vulkan.h"
 #include "impeller/toolkit/android/surface_control.h"
@@ -66,6 +70,62 @@ TEST(AndroidAHBSwapchainTest, AHBSwapchainDtorCallsWaitIdle) {
   EXPECT_NE(std::find(called_functions->begin(), called_functions->end(),
                       "vkDeviceWaitIdle"),
             called_functions->end());
+}
+
+TEST(AndroidAHBSwapchainTest, AHBSwapchainTracksOnscreenSubmissions) {
+  const auto context = MockVulkanContextBuilder()
+                           .SetDeviceExtensions(kAndroidDeviceExtensions)
+                           .Build();
+  auto tracker = context->GetSubmissionTracker();
+  ASSERT_NE(tracker, nullptr);
+  EXPECT_EQ(tracker->LatestSubmission(), 0u);
+  EXPECT_EQ(tracker->CompletedThrough(), 0u);
+
+  auto ahb_swapchain = std::shared_ptr<AHBSwapchainVK>(new AHBSwapchainVK(
+      context, std::make_shared<FakeSurfaceControl>(), {}, {100, 100}, false));
+  ASSERT_TRUE(ahb_swapchain->IsValid());
+
+  // Frame 0: AddFinalCommandBuffer + Present() exercises
+  // SubmitSignalForPresentReady and FenceWaiterVK async completion.
+  auto frame0 = ahb_swapchain->AcquireNextDrawable();
+  ASSERT_NE(frame0, nullptr);
+  auto cmd0 = context->CreateCommandBuffer();
+  ASSERT_NE(cmd0, nullptr);
+  ahb_swapchain->AddFinalCommandBuffer(cmd0);
+  EXPECT_EQ(tracker->LatestSubmission(), 1u);
+  EXPECT_EQ(tracker->CompletedThrough(), 0u);
+  [[maybe_unused]] bool presented0 = frame0->Present();
+  for (int i = 0; i < 100 && tracker->CompletedThrough() < 1u; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  EXPECT_EQ(tracker->CompletedThrough(), 1u);
+
+  // Terminate FenceWaiterVK so we also exercise the synchronous WaitForFence
+  // backstop when cycling back to the same synchronizer slot.
+  context->GetFenceWaiter()->Terminate();
+
+  auto frame1 = ahb_swapchain->AcquireNextDrawable();
+  ASSERT_NE(frame1, nullptr);
+  auto cmd1 = context->CreateCommandBuffer();
+  ASSERT_NE(cmd1, nullptr);
+  ahb_swapchain->AddFinalCommandBuffer(cmd1);
+  EXPECT_EQ(tracker->LatestSubmission(), 2u);
+  EXPECT_EQ(tracker->CompletedThrough(), 1u);
+  [[maybe_unused]] bool presented1 = frame1->Present();
+  EXPECT_EQ(tracker->CompletedThrough(), 1u);
+
+  auto frame2 = ahb_swapchain->AcquireNextDrawable();
+  ASSERT_NE(frame2, nullptr);
+  ahb_swapchain->AddFinalCommandBuffer(context->CreateCommandBuffer());
+  [[maybe_unused]] bool presented2 = frame2->Present();
+
+  // Cycling back to frame1's slot runs WaitForFence on a pending fence.
+  auto frame3 = ahb_swapchain->AcquireNextDrawable();
+  ASSERT_NE(frame3, nullptr);
+  EXPECT_EQ(tracker->CompletedThrough(), 2u);
+
+  ahb_swapchain.reset();
+  EXPECT_EQ(tracker->CompletedThrough(), 3u);
 }
 
 }  // namespace impeller::android::testing
