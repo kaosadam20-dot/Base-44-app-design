@@ -6,6 +6,8 @@
 #include "flutter/shell/platform/linux/testing/linux_test.h"
 #include "gtest/gtest.h"
 
+#include <functional>
+
 #include "flutter/shell/platform/embedder/test_utils/proc_table_replacement.h"
 #include "flutter/shell/platform/linux/fl_engine_private.h"
 #include "flutter/shell/platform/linux/fl_framebuffer.h"
@@ -13,7 +15,11 @@
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_json_message_codec.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_string_codec.h"
 #include "flutter/shell/platform/linux/testing/mock_epoxy.h"
+#include "flutter/shell/platform/linux/testing/mock_gtk.h"
 #include "flutter/shell/platform/linux/testing/mock_renderable.h"
+
+VsyncCallback fl_mock_engine_get_vsync_callback();
+void fl_mock_engine_reset_vsync_callback();
 
 // MOCK_ENGINE_PROC is leaky by design
 // NOLINTBEGIN(clang-analyzer-core.StackAddressEscape)
@@ -70,6 +76,106 @@ TEST_F(FlEngineTest, NotifyDisplayUpdate) {
   fl_engine_notify_display_update(engine, displays, 2);
 
   EXPECT_TRUE(called);
+}
+
+// Starts the engine with a captured vsync callback and a mocked OnVsync.
+static VsyncCallback start_engine_with_vsync(
+    FlEngine* engine,
+    std::function<void(uint64_t, uint64_t)> on_vsync) {
+  fl_mock_engine_reset_vsync_callback();
+  fl_engine_get_embedder_api(engine)->OnVsync = MOCK_ENGINE_PROC(
+      OnVsync,
+      ([on_vsync](auto engine, intptr_t baton, uint64_t frame_start_time_nanos,
+                  uint64_t frame_target_time_nanos) {
+        EXPECT_EQ(baton, 42);
+        on_vsync(frame_start_time_nanos, frame_target_time_nanos);
+        return kSuccess;
+      }));
+
+  EXPECT_TRUE(fl_engine_start(engine, nullptr));
+  VsyncCallback callback = fl_mock_engine_get_vsync_callback();
+  EXPECT_NE(callback, nullptr);
+  return callback;
+}
+
+// Checks the engine produces frames at the display refresh rate.
+TEST_F(FlEngineTest, VsyncUsesDisplayRefreshRate) {
+  ::testing::NiceMock<flutter::testing::MockGtk> gtk;
+  EXPECT_CALL(gtk, gdk_monitor_get_refresh_rate(::testing::_))
+      .WillRepeatedly(::testing::Return(144000));
+
+  uint64_t start_time = 0;
+  uint64_t target_time = 0;
+  VsyncCallback callback =
+      start_engine_with_vsync(engine, [&](uint64_t start, uint64_t target) {
+        start_time = start;
+        target_time = target;
+      });
+
+  callback(engine, 42);
+
+  // 144Hz is a 6944us frame interval.
+  EXPECT_EQ(target_time - start_time, 6944000u);
+}
+
+// Checks common high refresh rates are converted to the right interval.
+TEST_F(FlEngineTest, VsyncCommonRefreshRates) {
+  ::testing::NiceMock<flutter::testing::MockGtk> gtk;
+
+  uint64_t start_time = 0;
+  uint64_t target_time = 0;
+  VsyncCallback callback =
+      start_engine_with_vsync(engine, [&](uint64_t start, uint64_t target) {
+        start_time = start;
+        target_time = target;
+      });
+
+  struct RefreshRateCase {
+    int millihertz;
+    uint64_t expected_interval_ns;
+  } cases[] = {
+      {60000, 16667000u},  // 60Hz
+      {120000, 8333000u},  // 120Hz
+      {144000, 6944000u},  // 144Hz
+      {165000, 6061000u},  // 165Hz
+      {240000, 4167000u},  // 240Hz
+  };
+
+  for (const RefreshRateCase& test_case : cases) {
+    ON_CALL(gtk, gdk_monitor_get_refresh_rate(::testing::_))
+        .WillByDefault(::testing::Return(test_case.millihertz));
+    fl_engine_send_window_metrics_event(engine, 1, 1, 100, 100, 100, 100, 1.0);
+    callback(engine, 42);
+    EXPECT_EQ(target_time - start_time, test_case.expected_interval_ns)
+        << test_case.millihertz << "mHz";
+  }
+}
+
+// Checks a refresh rate update is picked up from window metrics.
+TEST_F(FlEngineTest, VsyncFollowsRefreshRateChange) {
+  ::testing::NiceMock<flutter::testing::MockGtk> gtk;
+  ON_CALL(gtk, gdk_monitor_get_refresh_rate(::testing::_))
+      .WillByDefault(::testing::Return(60000));
+
+  uint64_t start_time = 0;
+  uint64_t target_time = 0;
+  VsyncCallback callback =
+      start_engine_with_vsync(engine, [&](uint64_t start, uint64_t target) {
+        start_time = start;
+        target_time = target;
+      });
+
+  fl_engine_send_window_metrics_event(engine, 1, 1, 100, 100, 100, 100, 1.0);
+
+  callback(engine, 42);
+  EXPECT_EQ(target_time - start_time, 16667000u);
+
+  ON_CALL(gtk, gdk_monitor_get_refresh_rate(::testing::_))
+      .WillByDefault(::testing::Return(144000));
+  fl_engine_send_window_metrics_event(engine, 1, 1, 100, 100, 100, 100, 1.0);
+
+  callback(engine, 42);
+  EXPECT_EQ(target_time - start_time, 6944000u);
 }
 
 // Checks asking the engine to render a frame works.
