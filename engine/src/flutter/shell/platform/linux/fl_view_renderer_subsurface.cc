@@ -194,6 +194,23 @@ static void update_parent_surface(FlViewRendererSubsurface* self) {
   fl_engine_schedule_frame(self->engine);
 }
 
+// Run update_parent_surface() after GTK has finished mapping the window.
+// The GTK map signal can run before a replacement Wayland toplevel surface
+// exists, so the first update sees no parent surface. A second pass once the
+// main loop is idle reliably picks up the new surface and recreates the
+// subsurface.
+static gboolean update_parent_surface_idle_cb(gpointer user_data) {
+  FlViewRendererSubsurface* self = FL_VIEW_RENDERER_SUBSURFACE(user_data);
+  // The window may be hidden again before this idle callback runs. In that
+  // case the toplevel Wayland surface is going away and must not be used to
+  // create another subsurface.
+  if (gtk_widget_get_mapped(GTK_WIDGET(self))) {
+    update_parent_surface(self);
+  }
+  g_object_unref(self);
+  return G_SOURCE_REMOVE;
+}
+
 // Redraw the view from the GTK thread.
 static gboolean redraw_cb(gpointer user_data) {
   g_autoptr(FlViewRendererSubsurface) self =
@@ -271,7 +288,9 @@ static void fl_view_renderer_subsurface_unrealize(GtkWidget* widget) {
 static void fl_view_renderer_subsurface_map(GtkWidget* widget) {
   GTK_WIDGET_CLASS(fl_view_renderer_subsurface_parent_class)->map(widget);
 
-  update_parent_surface(FL_VIEW_RENDERER_SUBSURFACE(widget));
+  FlViewRendererSubsurface* self = FL_VIEW_RENDERER_SUBSURFACE(widget);
+  update_parent_surface(self);
+  g_idle_add(update_parent_surface_idle_cb, g_object_ref(self));
 }
 
 // Implements GtkWidget::draw.
