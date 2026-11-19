@@ -7,7 +7,6 @@ import 'package:process/process.dart';
 
 import 'runner.dart' as runner;
 import 'src/base/context.dart';
-import 'src/base/file_system.dart';
 import 'src/base/io.dart';
 import 'src/base/logger.dart';
 import 'src/base/platform.dart';
@@ -51,8 +50,6 @@ import 'src/commands/widget_preview.dart';
 import 'src/context/tool_context.dart';
 import 'src/context/tool_dependencies.dart';
 import 'src/experimental/extension_discovery.dart';
-import 'src/experimental/extension_manager.dart';
-import 'src/experimental/templates.dart';
 import 'src/features.dart';
 // Files in `isolated` are intentionally excluded from google3 tooling.
 import 'src/isolated/build_targets.dart';
@@ -127,27 +124,11 @@ Future<void> main(List<String> args) async {
 
   await runner.run(
     args,
-    (ToolDependencies toolDependencies) {
-      final ToolDependencies(
-        :ExtensionManager? extensionManager,
-        :FeatureFlags featureFlags,
-        toolContext: ToolContext(:Cache cache, :FileSystem fs, :Logger logger),
-      ) = toolDependencies;
-      final ExtensionManager manager = extensionManager!;
-      final templateManager = ExtensionTemplateManager(
-        extensionManager: manager,
-        featureFlags: featureFlags,
-        fileSystem: fs,
-        flutterRoot: cache.flutterRoot,
-        logger: logger,
-      );
-      return generateCommands(
-        toolDependencies: toolDependencies,
-        verboseHelp: verboseHelp,
-        verbose: verbose,
-        extensionTemplateManager: templateManager,
-      );
-    },
+    (ToolDependencies toolDependencies) => generateCommands(
+      toolDependencies: toolDependencies,
+      verboseHelp: verboseHelp,
+      verbose: verbose,
+    ),
     buildTargets: const BuildTargetsImpl(),
     extensionEntryPoints: <ExtensionEntryPoint>[linuxExtensionEntryPoint],
     flutterHookRunner: FlutterHookRunnerNative(),
@@ -173,7 +154,6 @@ List<FlutterCommand> generateCommands({
   required ToolDependencies toolDependencies,
   required bool verbose,
   required bool verboseHelp,
-  ExtensionTemplateManager? extensionTemplateManager,
 }) {
   final ToolDependencies(:FeatureFlags featureFlags, :ToolContext toolContext) = toolDependencies;
   final ToolContext(
@@ -254,7 +234,6 @@ List<FlutterCommand> generateCommands({
       templatePathProvider: toolDependencies.templatePathProvider,
       templateRenderer: const MustacheTemplateRenderer(),
       toolContext: toolContext,
-      extensionTemplateManager: extensionTemplateManager,
       verboseHelp: verboseHelp,
     ),
     DaemonCommand(
