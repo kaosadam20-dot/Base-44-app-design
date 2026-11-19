@@ -119,6 +119,8 @@ TaskFunction createAndroidHCPPScrollPerfTest() {
     enableImpeller: true,
     enableHcpp: true,
     enableMergedPlatformThread: true,
+    // TODO(andywolff): Enable once https://github.com/flutter/flutter/issues/196834 is resolved.
+    enableVulkanGPUTracing: false,
   ).run;
 }
 
@@ -129,6 +131,8 @@ TaskFunction createAndroidViewScrollPerfTest() {
     'platform_views_scroll_perf_hybrid_composition',
     testDriver: 'test_driver/scroll_perf_test.dart',
     enableMergedPlatformThread: true,
+    // TODO(andywolff): Enable once https://github.com/flutter/flutter/issues/196834 is resolved.
+    enableVulkanGPUTracing: false,
   ).run;
 }
 
@@ -1247,6 +1251,7 @@ class PerfTest {
     this.enableMergedPlatformThread = false,
     this.enableHcpp = false,
     this.enableLazyShaderMode = false,
+    this.enableVulkanGPUTracing = true,
     this.createPlatforms = const <String>[],
   });
 
@@ -1270,6 +1275,7 @@ class PerfTest {
     this.enableMergedPlatformThread = false,
     this.enableHcpp = false,
     this.enableLazyShaderMode = false,
+    this.enableVulkanGPUTracing = false,
     this.createPlatforms = const <String>[],
   }) : saveTraceFile = false,
        timelineFileName = null;
@@ -1330,6 +1336,9 @@ class PerfTest {
 
   /// Whether to defer construction of all PSO objects in the Impeller backend.
   final bool enableLazyShaderMode;
+
+  /// Whether to enable Vulkan GPU tracing in AndroidManifest.xml when running with Impeller.
+  final bool enableVulkanGPUTracing;
 
   /// Number of seconds to time out the test after, allowing debug callbacks to run.
   final int? timeoutSeconds;
@@ -1416,20 +1425,36 @@ class PerfTest {
         }
       }
 
+      final bool isAndroidDevice = const <DeviceOperatingSystem>{
+        DeviceOperatingSystem.android,
+        DeviceOperatingSystem.androidArm,
+        DeviceOperatingSystem.androidArm64,
+      }.contains(deviceOperatingSystem);
+      final bool isImpellerEnabled = enableImpeller ?? true;
+      final bool isGlesTracingForced = forceOpenGLES ?? false;
+      final bool shouldTraceVulkanGPU =
+          isAndroidDevice && isImpellerEnabled && enableVulkanGPUTracing && !isGlesTracingForced;
+
       try {
-        if (enableImpeller ?? false) {
+        if (shouldTraceVulkanGPU) {
           changedManifest = true;
           _addVulkanGPUTracingToManifest(testDirectory);
-          if (forceOpenGLES ?? false) {
+        }
+        if (isAndroidDevice && (enableImpeller ?? false)) {
+          if (isGlesTracingForced) {
+            changedManifest = true;
             _addOpenGLESToManifest(testDirectory);
           }
           if (enableMergedPlatformThread) {
+            changedManifest = true;
             _addMergedPlatformThreadSupportToManifest(testDirectory);
           }
           if (enableHcpp) {
+            changedManifest = true;
             _addHcppSupportToManifest(testDirectory);
           }
           if (enableLazyShaderMode) {
+            changedManifest = true;
             _addLazyShaderMode(testDirectory);
           }
         }
@@ -1503,6 +1528,11 @@ class PerfTest {
           recordGPU = false;
       }
 
+      // Tracing on Android requires Impeller combined with either Vulkan or forced GLES.
+      final bool isAndroidGPUTracingActive =
+          isImpellerEnabled && (enableVulkanGPUTracing || isGlesTracingForced);
+
+      final bool recordGPUFrameTime = recordGPU && (!isAndroidDevice || isAndroidGPUTracingActive);
       final isAndroid = deviceOperatingSystem == DeviceOperatingSystem.android;
       return TaskResult.success(
         data,
@@ -1535,7 +1565,7 @@ class PerfTest {
               if (data['120hz_frame_percentage'] != null) '120hz_frame_percentage',
               if (data['illegal_refresh_rate_frame_count'] != null)
                 'illegal_refresh_rate_frame_count',
-              if (recordGPU) ...<String>[
+              if (recordGPUFrameTime) ...<String>[
                 // GPU Frame Time.
                 if (data['average_gpu_frame_time'] != null) 'average_gpu_frame_time',
                 if (data['90th_percentile_gpu_frame_time'] != null)
@@ -1543,6 +1573,8 @@ class PerfTest {
                 if (data['99th_percentile_gpu_frame_time'] != null)
                   '99th_percentile_gpu_frame_time',
                 if (data['worst_gpu_frame_time'] != null) 'worst_gpu_frame_time',
+              ],
+              if (recordGPU) ...<String>[
                 // GPU Memory.
                 if (data['average_gpu_memory_mb'] != null) 'average_gpu_memory_mb',
                 if (data['90th_percentile_gpu_memory_mb'] != null) '90th_percentile_gpu_memory_mb',
