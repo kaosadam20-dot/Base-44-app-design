@@ -9,6 +9,43 @@ import 'package:flutter_test/flutter_test.dart';
 import 'semantics_tester.dart';
 
 void main() {
+  // Regression test for https://github.com/flutter/flutter/issues/196649.
+  testWidgets('SliverResizingHeader does not report the extent prototypes as painted', (
+    WidgetTester tester,
+  ) async {
+    const minKey = Key('min');
+    const maxKey = Key('max');
+    const childKey = Key('child');
+    await tester.pumpWidget(
+      const Directionality(
+        textDirection: TextDirection.ltr,
+        child: CustomScrollView(
+          slivers: <Widget>[
+            SliverResizingHeader(
+              minExtentPrototype: SizedBox(key: minKey, height: 50),
+              maxExtentPrototype: SizedBox(key: maxKey, height: 100),
+              child: SizedBox(key: childKey),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    bool paintsChild(Key key) {
+      RenderObject child = tester.renderObject(find.byKey(key, skipOffstage: false));
+      RenderObject parent = child.parent!;
+      while ('${parent.runtimeType}' != '_RenderSliverResizingHeader') {
+        child = parent;
+        parent = parent.parent!;
+      }
+      return parent.paintsChild(child);
+    }
+
+    expect(paintsChild(minKey), isFalse);
+    expect(paintsChild(maxKey), isFalse);
+    expect(paintsChild(childKey), isTrue);
+  });
+
   testWidgets('SliverResizingHeader basics', (WidgetTester tester) async {
     Widget buildFrame({required Axis axis, required bool reverse}) {
       final (Widget minPrototype, Widget maxPrototype) = switch (axis) {

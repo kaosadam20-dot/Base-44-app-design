@@ -77,6 +77,40 @@ class _StatefulListViewState extends State<_StatefulListView> {
 }
 
 void main() {
+  // Regression test for https://github.com/flutter/flutter/issues/196649.
+  testWidgets('ListView does not report children in the cache extent as painted', (
+    WidgetTester tester,
+  ) async {
+    const cachedKey = Key('cached');
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: 200,
+            height: 200,
+            child: ListView(
+              children: const <Widget>[
+                SizedBox(height: 200),
+                SizedBox(key: cachedKey, height: 100),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    final RenderSliverList list = tester.renderObject(find.byType(SliverList));
+    expect(list.paintsChild(list.firstChild!), isTrue);
+    expect(list.paintsChild(list.lastChild!), isFalse);
+
+    // The paint transform of the child in the cache extent is kept.
+    final Matrix4 transform = tester
+        .renderObject(find.byKey(cachedKey, skipOffstage: false))
+        .getTransformTo(null);
+    expect(MatrixUtils.transformPoint(transform, Offset.zero), const Offset(0, 200));
+  });
+
   // Regression test for https://github.com/flutter/flutter/issues/100451
   testWidgets('ListView.builder respects findChildIndexCallback', (WidgetTester tester) async {
     var finderCalled = false;

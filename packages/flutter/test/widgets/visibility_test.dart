@@ -30,6 +30,30 @@ class _TestStateState extends State<TestState> {
 }
 
 void main() {
+  // Regression test for https://github.com/flutter/flutter/issues/196649.
+  testWidgets('Visibility.maintain reports the child as painted only when visible', (
+    WidgetTester tester,
+  ) async {
+    const childKey = Key('child');
+    bool paintsChild() {
+      RenderObject child = tester.renderObject(find.byKey(childKey, skipOffstage: false));
+      RenderObject parent = child.parent!;
+      while ('${parent.runtimeType}' != '_RenderVisibility') {
+        child = parent;
+        parent = parent.parent!;
+      }
+      return parent.paintsChild(child);
+    }
+
+    await tester.pumpWidget(
+      const Visibility.maintain(visible: false, child: SizedBox(key: childKey)),
+    );
+    expect(paintsChild(), isFalse);
+
+    await tester.pumpWidget(const Visibility.maintain(child: SizedBox(key: childKey)));
+    expect(paintsChild(), isTrue);
+  });
+
   testWidgets('Visibility', (WidgetTester tester) async {
     final semantics = SemanticsTester(tester);
     final log = <String>[];
