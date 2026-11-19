@@ -12,6 +12,7 @@ import 'package:meta/meta.dart';
 import 'package:stream_channel/isolate_channel.dart';
 
 import '../base/logger.dart';
+import '../base/terminal.dart';
 
 /// Typedef for an in-process extension isolate entrypoint function.
 ///
@@ -36,6 +37,9 @@ class ExtensionConnection {
 
   /// Fallback extension name used when an extension does not report one in its capabilities.
   static const defaultExtensionName = 'unknown_extension';
+
+  static const _ansiCsiPrefix = '\u001B[';
+  static final _ansiSgrPattern = RegExp('\u001B\\[[0-9;]*m');
 
   // Bounded grace period for `extension.shutdown` RPCs so extensions can
   // terminate child processes and tunnels before the isolate is killed
@@ -107,6 +111,13 @@ class ExtensionConnection {
   Stream<Map<String, Object?>> onNotification(String method) {
     if (isDisposed) {
       throw StateError('ExtensionConnection has been disposed.');
+    }
+    if (method == ToolExtensionEntryPoint.logNotificationMethod) {
+      throw ArgumentError.value(
+        method,
+        'method',
+        'Notifications for "${ToolExtensionEntryPoint.logNotificationMethod}" are handled by ExtensionConnection and routed to the host Logger.',
+      );
     }
     final StreamController<Map<String, Object?>>
     controller = _notificationControllers.putIfAbsent(method, () {
@@ -304,6 +315,46 @@ class ExtensionConnection {
       logger.printTrace('ExtensionConnection isolate spawned; connecting IsolateChannel...');
       final channel = IsolateChannel<Object?>.connectReceive(receivePort);
       final peer = json_rpc.Peer.withoutJson(channel);
+
+      peer.registerMethod(ToolExtensionEntryPoint.logNotificationMethod, (
+        json_rpc.Parameters params,
+      ) {
+        final String currentExtensionName =
+            connection?.extensionName ?? extensionName ?? defaultExtensionName;
+        final Object? rawValue = params.value;
+        if (rawValue is! Map<String, Object?>) {
+          logger.printWarning(
+            'Extension "$currentExtensionName" sent malformed "${ToolExtensionEntryPoint.logNotificationMethod}" notification: expected Map<String, Object?>.',
+          );
+          return;
+        }
+        final ExtensionLogMessage logMessage;
+        try {
+          logMessage = ExtensionLogMessage.fromJson(rawValue);
+        } on FormatException catch (error) {
+          logger.printWarning(
+            'Extension "$currentExtensionName" sent malformed "${ToolExtensionEntryPoint.logNotificationMethod}" notification: $error',
+          );
+          return;
+        }
+        String message = logMessage.message;
+        if (!logger.supportsColor) {
+          message = message.replaceAll(_ansiSgrPattern, '');
+        } else if (message.contains(_ansiCsiPrefix)) {
+          message = '$message${AnsiTerminal.resetAll}';
+        }
+        final formatted = '[$currentExtensionName] $message';
+        switch (logMessage.level) {
+          case .trace:
+            logger.printTrace(formatted);
+          case .info:
+            logger.printStatus(formatted);
+          case .warning:
+            logger.printWarning(formatted);
+          case .error:
+            logger.printError(formatted);
+        }
+      });
 
       unawaited(peer.listen());
 
