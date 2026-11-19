@@ -185,7 +185,25 @@ TEST(AndroidVulkanTest, TextureSourceDeleteAfterContextDelete) {
       std::make_shared<AHBTextureSourceVK>(context, buffer.get(), desc);
   ASSERT_TRUE(texture->IsValid());
 
+  auto framebuffer =
+      context->GetDevice().createFramebufferUnique(vk::FramebufferCreateInfo{});
+  ASSERT_EQ(framebuffer.result, vk::Result::eSuccess);
+  auto render_pass =
+      context->GetDevice().createRenderPassUnique(vk::RenderPassCreateInfo{});
+  ASSERT_EQ(render_pass.result, vk::Result::eSuccess);
+  texture->SetCachedFrameData(
+      FramebufferAndRenderPass{
+          .framebuffer = MakeSharedVK(std::move(framebuffer.value),
+                                      context->GetDeviceHolder()),
+          .render_pass = MakeSharedVK(std::move(render_pass.value),
+                                      context->GetDeviceHolder()),
+      },
+      SampleCount::kCount1,
+      /*mip_level=*/0,
+      /*slice=*/0);
+
   // Delete the context and its VkDevice.
+  context->Shutdown();
   context.reset();
 
   // Delete the AHBTextureSourceVK and verify that the destructor does not call
