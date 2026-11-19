@@ -11,6 +11,7 @@ import 'package:ui/ui_web/src/ui_web.dart' as ui_web;
 import '../browser_detection.dart';
 import '../dom.dart';
 import '../platform_dispatcher.dart';
+import '../text_editing/autofill_hint.dart';
 import '../text_editing/input_type.dart';
 import '../text_editing/text_editing.dart';
 import 'semantics.dart';
@@ -547,12 +548,20 @@ class SemanticTextField extends SemanticRole {
 
   void _updateInputType() {
     if (semanticsObject.flags.isMultiline) {
-      // text area can't be annotated with input type
+      // A text area can't be annotated with an input type, but it can declare
+      // its purpose, for example a multiline street address.
+      if (!_isAutofillOwned) {
+        editableElement.setAttribute('autocomplete', 'off');
+      }
+      _updateAutofillHint();
       return;
     }
     final input = editableElement as DomHTMLInputElement;
     if (semanticsObject.flags.isObscured) {
       input.type = 'password';
+      if (!_isAutofillOwned) {
+        input.autocomplete = 'off';
+      }
     } else {
       // For email inputs, prefer type="text" with inputmode="email" so that
       // browsers keep selection APIs enabled while still providing email
@@ -581,6 +590,23 @@ class SemanticTextField extends SemanticRole {
         default:
       }
     }
+    _updateAutofillHint();
+  }
+
+  /// Declares the field's purpose from the autofill hints carried by
+  /// semantics, so the hint is exposed before the field is ever focused.
+  ///
+  /// Once an autofill group or a text input connection applies its own hint,
+  /// [_isAutofillOwned] is true and that hint is kept.
+  void _updateAutofillHint() {
+    final List<String>? hints = semanticsObject.autofillHints;
+    if (hints == null || hints.isEmpty || _isAutofillOwned) {
+      return;
+    }
+    editableElement.setAttribute(
+      'autocomplete',
+      BrowserAutofillHints.instance.flutterToEngine(hints.first),
+    );
   }
 
   @override
