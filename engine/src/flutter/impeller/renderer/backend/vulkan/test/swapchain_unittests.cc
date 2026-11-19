@@ -2,9 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <chrono>
+#include <thread>
+
 #include "flutter/testing/testing.h"  // IWYU pragma: keep
 #include "gtest/gtest.h"
+#include "impeller/core/allocator.h"
+#include "impeller/core/device_buffer.h"
 #include "impeller/core/formats.h"
+#include "impeller/core/host_buffer.h"
+#include "impeller/renderer/backend/vulkan/fence_waiter_vk.h"
+#include "impeller/renderer/backend/vulkan/surface_context_vk.h"
 #include "impeller/renderer/backend/vulkan/swapchain/khr/khr_swapchain_vk.h"
 #include "impeller/renderer/backend/vulkan/test/mock_vulkan.h"
 #include "impeller/renderer/backend/vulkan/texture_vk.h"
@@ -198,6 +206,162 @@ TEST(SwapchainTest, SwapchainSizeChangeDoesNotAcquireDrawable) {
   // Verify that the call to AcquireNextDrawable after the resize did not make
   // any extra calls to the underlying Vulkan API.
   EXPECT_EQ(acquire_call_count, 1);
+}
+
+TEST(SwapchainTest, TracksOnscreenSubmissions) {
+  auto const context = MockVulkanContextBuilder().Build();
+  auto tracker = context->GetSubmissionTracker();
+  ASSERT_NE(tracker, nullptr);
+  EXPECT_EQ(tracker->LatestSubmission(), 0u);
+  EXPECT_EQ(tracker->CompletedThrough(), 0u);
+
+  auto surface = CreateSurface(*context);
+  auto swapchain =
+      KHRSwapchainVK::Create(context, std::move(surface), ISize{1, 1});
+  ASSERT_TRUE(swapchain->IsValid());
+
+  // Frame 0: SubmitOnscreen records a pending submission before Present().
+  auto frame0 = swapchain->AcquireNextDrawable();
+  ASSERT_NE(frame0, nullptr);
+  auto cmd0 = context->CreateCommandBuffer();
+  ASSERT_NE(cmd0, nullptr);
+  swapchain->AddFinalCommandBuffer(cmd0);
+  EXPECT_EQ(tracker->LatestSubmission(), 1u);
+  EXPECT_EQ(tracker->CompletedThrough(), 0u);
+  EXPECT_TRUE(frame0->Present());
+
+  // Even without acquiring another frame on this swapchain, FenceWaiterVK
+  // completes the submission asynchronously.
+  for (int i = 0; i < 100 && tracker->CompletedThrough() < 1u; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  EXPECT_EQ(tracker->CompletedThrough(), 1u);
+
+  // Terminate FenceWaiterVK so we can also verify the synchronous backstop on
+  // WaitForFence / teardown.
+  context->GetFenceWaiter()->Terminate();
+
+  auto frame1 = swapchain->AcquireNextDrawable();
+  ASSERT_NE(frame1, nullptr);
+  auto cmd1 = context->CreateCommandBuffer();
+  ASSERT_NE(cmd1, nullptr);
+  swapchain->AddFinalCommandBuffer(cmd1);
+  EXPECT_EQ(tracker->LatestSubmission(), 2u);
+  EXPECT_EQ(tracker->CompletedThrough(), 1u);
+  EXPECT_TRUE(frame1->Present());
+  EXPECT_EQ(tracker->CompletedThrough(), 1u);
+
+  // Destroying the swapchain completes any remaining pending submission (2).
+  swapchain.reset();
+  EXPECT_EQ(tracker->CompletedThrough(), 2u);
+}
+
+TEST(SwapchainTest, WaitForFenceFailureDoesNotCompleteSubmission) {
+  VkResult wait_result = VK_SUCCESS;
+  auto const context =
+      MockVulkanContextBuilder()
+          .SetWaitForFencesCallback(
+              [&](VkDevice, uint32_t, const VkFence*, VkBool32,
+                  uint64_t) -> VkResult { return wait_result; })
+          .Build();
+  context->GetFenceWaiter()->Terminate();
+  auto tracker = context->GetSubmissionTracker();
+  ASSERT_NE(tracker, nullptr);
+
+  auto surface = CreateSurface(*context);
+  auto swapchain =
+      KHRSwapchainVK::Create(context, std::move(surface), ISize{1, 1});
+  ASSERT_TRUE(swapchain->IsValid());
+
+  auto frame0 = swapchain->AcquireNextDrawable();
+  ASSERT_NE(frame0, nullptr);
+  swapchain->AddFinalCommandBuffer(context->CreateCommandBuffer());
+  EXPECT_TRUE(frame0->Present());
+
+  auto frame1 = swapchain->AcquireNextDrawable();
+  ASSERT_NE(frame1, nullptr);
+  EXPECT_TRUE(frame1->Present());
+
+  // Next acquire cycles back to slot 0; if WaitForFence fails, submission 1
+  // must stay pending until teardown.
+  wait_result = VK_ERROR_DEVICE_LOST;
+  EXPECT_EQ(swapchain->AcquireNextDrawable(), nullptr);
+  EXPECT_EQ(tracker->CompletedThrough(), 0u);
+
+  swapchain.reset();
+  EXPECT_EQ(tracker->CompletedThrough(), 1u);
+}
+
+TEST(SwapchainTest, SurfaceContextSubmitOnscreenRetiresHostBuffer) {
+  class TestDeviceBuffer final : public DeviceBuffer {
+   public:
+    explicit TestDeviceBuffer(DeviceBufferDescriptor desc)
+        : DeviceBuffer(desc), contents_(desc.size, 0) {}
+
+    bool SetLabel(std::string_view label) override { return true; }
+    bool SetLabel(std::string_view label, Range range) override { return true; }
+    uint8_t* OnGetContents() const override {
+      return const_cast<uint8_t*>(contents_.data());
+    }
+    bool OnCopyHostBuffer(const uint8_t* source,
+                          Range source_range,
+                          size_t offset) override {
+      return true;
+    }
+
+   private:
+    std::vector<uint8_t> contents_;
+  };
+
+  class TestAllocator final : public Allocator {
+   public:
+    ISize GetMaxTextureSizeSupported() const override { return {1024, 1024}; }
+    std::shared_ptr<DeviceBuffer> OnCreateBuffer(
+        const DeviceBufferDescriptor& desc) override {
+      return std::make_shared<TestDeviceBuffer>(desc);
+    }
+    std::shared_ptr<Texture> OnCreateTexture(const TextureDescriptor& desc,
+                                             bool threadsafe) override {
+      return nullptr;
+    }
+  };
+
+  auto const context = MockVulkanContextBuilder().Build();
+  auto surface = CreateSurface(*context);
+  auto swapchain =
+      KHRSwapchainVK::Create(context, std::move(surface), ISize{1, 1});
+  ASSERT_TRUE(swapchain->IsValid());
+
+  SurfaceContextVK surface_context(context);
+  ASSERT_TRUE(surface_context.SetSwapchain(swapchain));
+
+  auto allocator = std::make_shared<TestAllocator>();
+  auto host_buffer =
+      HostBuffer::Create(allocator, surface_context.GetIdleWaiter(), 256,
+                         surface_context.GetSubmissionTracker());
+
+  // Onscreen frame records submission before HostBuffer::Reset() stamps slot 0.
+  auto frame0 = swapchain->AcquireNextDrawable();
+  ASSERT_NE(frame0, nullptr);
+  ASSERT_TRUE(surface_context.SubmitOnscreen(context->CreateCommandBuffer()));
+  auto original_slot0 = host_buffer->Emplace(nullptr, 16, 4).GetBuffer();
+  host_buffer->Reset();
+
+  // 3 rapid offscreen resets wrap back to slot 0 while onscreen is pending;
+  // HostBuffer must retire/replace slot 0 instead of reusing original_slot0.
+  for (int i = 0; i < 3; ++i) {
+    host_buffer->Reset();
+  }
+  EXPECT_NE(host_buffer->Emplace(nullptr, 16, 4).GetBuffer(), original_slot0);
+
+  // Presenting triggers FenceWaiterVK to advance CompletedThrough() without
+  // another AcquireNextDrawable().
+  EXPECT_TRUE(frame0->Present());
+  auto tracker = context->GetSubmissionTracker();
+  for (int i = 0; i < 100 && tracker->CompletedThrough() < 1u; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  EXPECT_GE(tracker->CompletedThrough(), 1u);
 }
 
 }  // namespace testing
